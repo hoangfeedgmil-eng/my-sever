@@ -1,5 +1,99 @@
 const express = require('express');
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+
 const app = express();
-const PORT = process.env.PORT || 10000;
-app.get('/', (req, res) => res.send('Server is running!'));
-app.listen(PORT, '0.0.0.0', () => console.log(`Server running on ${PORT}`));
+const PORT = process.env.PORT || 3000;
+const KEYS_FILE = path.join(__dirname, 'keys.json');
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public'));
+
+// ----- Hàm đọc/ghi key an toàn (có try-catch) -----
+const readKeys = () => {
+  try {
+    if (!fs.existsSync(KEYS_FILE)) return {};
+    return JSON.parse(fs.readFileSync(KEYS_FILE, 'utf8'));
+  } catch (e) {
+    console.error('Lỗi đọc keys.json:', e.message);
+    return {};
+  }
+};
+
+const writeKeys = (data) => {
+  try {
+    fs.writeFileSync(KEYS_FILE, JSON.stringify(data, null, 2));
+    return true;
+  } catch (e) {
+    console.error('Lỗi ghi keys.json:', e.message);
+    return false;
+  }
+};
+
+// ----- Endpoint tạo key (có validation) -----
+app.post('/generate-key', (req, res) => {
+  const { duration } = req.body;
+  if (!duration) return res.status(400).json({ error: 'Thiếu duration' });
+
+  const validDurations = ['1d', '7d', '30d', '1y'];
+  if (!validDurations.includes(duration)) {
+    return res.status(400).json({ error: 'Duration không hợp lệ. Chỉ nhận: 1d, 7d, 30d, 1y' });
+  }
+
+  const key = 'KEY-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substr(2, 6).toUpperCase();
+  const now = Date.now();
+  let expiry = now;
+  switch(duration) {
+    case '1d': expiry += 86400000; break;
+    case '7d': expiry += 7*86400000; break;
+    case '30d': expiry += 30*86400000; break;
+    case '1y': expiry += 365*86400000; break;
+  }
+
+  const keys = readKeys();
+  // Tránh trùng key (dù xác suất thấp)
+  if (keys[key]) return res.status(500).json({ error: 'Key bị trùng, thử lại' });
+
+  keys[key] = { expiry, createdAt: now, duration };
+  if (!writeKeys(keys)) {
+    return res.status(500).json({ error: 'Không thể lưu key' });
+  }
+
+  res.json({ key, expiry: new Date(expiry).toISOString() });
+});
+
+// ----- Endpoint xác thực key (có kiểm tra hết hạn) -----
+app.post('/verify-key', (req, res) => {
+  const { key } = req.body;
+  if (!key) return res.status(400).json({ valid: false, error: 'Thiếu key' });
+
+  const keys = readKeys();
+  const data = keys[key];
+  if (!data) return res.json({ valid: false, error: 'Key không tồn tại' });
+  
+  if (Date.now() > data.expiry) {
+    // Xoá key hết hạn khỏi file luôn (tuỳ mày, tao làm sạch)
+    delete keys[key];
+    writeKeys(keys);
+    return res.json({ valid: false, error: 'Key đã hết hạn' });
+  }
+
+  res.json({ valid: true, expiry: new Date(data.expiry).toISOString() });
+});
+
+// ----- (Tuỳ chọn) Endpoint lấy danh sách key (admin) -----
+app.get('/admin/keys', (req, res) => {
+  const keys = readKeys();
+  const now = Date.now();
+  const list = Object.entries(keys).map(([k, v]) => ({
+    key: k,
+    expiry: new Date(v.expiry).toISOString(),
+    expired: now > v.expiry
+  }));
+  res.json(list);
+});
+
+app.listen(PORT, () => console.log(`🔥 DEVILS RISE on http://localhost:${PORT}`));
